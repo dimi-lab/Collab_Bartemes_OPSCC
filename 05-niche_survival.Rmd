@@ -1,0 +1,304 @@
+---
+title: "OPSCC Niche Survival Analysis"
+output:
+  html_document:
+    code_folding: hide
+    df_print: paged 
+    geometry: margin=2cm
+    highlight: textmate
+    theme: journal
+    fig_crop: false
+  pdf_document: default
+---
+<style type="text/css">
+.main-container {
+max-width: 1200px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(data.table)
+require(survival)
+
+root_path <- "."
+getwd()
+```
+
+
+```{r cars}
+toe <- read_csv(paste0(root_path, "time_to_event.csv"))
+toe <- toe %>% mutate(`IMC Hyperion ID` = gsub(',',';',`IMC Hyperion ID`)) %>% 
+  separate_longer_delim(`IMC Hyperion ID`, delim=";") %>% mutate(`IMC Hyperion ID` = gsub(' ','',`IMC Hyperion ID`)) %>% 
+  mutate(`IMC Hyperion ID` = gsub('-Tumor','',`IMC Hyperion ID`)) %>% 
+  mutate(`IMC Hyperion ID` = gsub('-LN','',`IMC Hyperion ID`)) %>% mutate(day_to_followup = Years_to_Progression_or_Last_Followup * 365)
+
+
+allNiches <- read_csv(paste0(root_path, "cells_9neighborhood.csv"))
+names(allNiches)
+```
+
+# Original Survival
+```{r fig.height = 4, fig.width = 5}
+summaryNiche <- allNiches %>% group_by(SampleName) %>% mutate(total = n()) %>% 
+  group_by(SampleName,neighborhood50,total) %>% summarise(members = n()) %>%
+  mutate(perc = members/total) %>% group_by(neighborhood50) %>% 
+  mutate(mu = median(perc)) %>% mutate(nicheLabel = if_else(perc >= mu, "High","Low"))
+
+for(k in 0:8){
+  tmp <- summaryNiche %>% filter(neighborhood50 == k)
+  jointDF <- merge(tmp,toe, by.x = "SampleName", by.y = "IMC Hyperion ID")
+  
+  
+  surv.obj <- Surv(jointDF$day_to_followup, jointDF$Case)
+  niche.HvL <- as.factor(jointDF$nicheLabel)
+  survfit( (surv.obj ~ niche.HvL) )
+  cox.res <- summary( coxph(surv.obj ~ niche.HvL)  )
+  pval.str <- format(cox.res$logtest["pvalue"], digits = 3)
+  #pdf(paste0("survival_plots/niche_", k, "_KM_curve.pdf"), height = 5, width = 6)
+  plot(survfit(surv.obj ~ niche.HvL), lwd = 3, col = 1:2, 
+       main = paste("Niche: ",k, "\np=", pval.str),
+       xlab = "Days")
+  legend("topright", levels(niche.HvL),
+         col = 1:2, lwd = 2)
+  #dev.off()
+  
+}
+```
+
+# Survival with tissue types separated
+```{r fig.height = 8, fig.width = 10}
+library(tidyverse)
+library(survminer)
+library(survival)
+library(KMsurv)
+library(ggfortify)
+library(ggthemes)
+
+summaryNiche_withorigin <- allNiches %>% group_by(SampleName, SiteLoc, Cohort) %>% mutate(total = n()) %>% 
+  group_by(SampleName, SiteLoc, Cohort, neighborhood50,total) %>% summarise(members = n()) %>%
+  mutate(perc = members/total) %>% group_by(neighborhood50) %>% mutate(mu = median(perc)) %>% 
+  mutate(nicheLabel = if_else(perc >= mu, "High","Low"))
+
+res_df <- data.frame(matrix(ncol = 21, nrow = 0))
+
+for(k in 0:8){
+  
+  tmp <- summaryNiche_withorigin %>% filter(neighborhood50 == k)
+  jointDF <- merge(tmp,toe, by.x = "SampleName", by.y = "IMC Hyperion ID")
+  
+  
+  surv.obj <- Surv(jointDF$day_to_followup, jointDF$Case)
+  niche.HvL <- as.factor(jointDF$nicheLabel)
+  site <- as.factor(jointDF$SiteLoc)
+  sfit <- survfit(surv.obj ~ niche.HvL + site)
+  
+  jointDF$site <- site
+  
+  cox.res <- summary(coxph(surv.obj ~ niche.HvL + site))
+  pval.str <- format(cox.res$logtest["pvalue"], digits = 3)
+  
+  coef_hvl <- cox.res$coefficients[,'coef']['niche.HvLLow']
+  coef_site <- cox.res$coefficients[,'coef']['sitePrimarySite']
+  
+  exp_coef_hvl <- cox.res$coefficients[,'exp(coef)']['niche.HvLLow']
+  exp_coef_site <- cox.res$coefficients[,'exp(coef)']['sitePrimarySite']
+  
+  se_coef_hvl <- cox.res$coefficients[,'se(coef)']['niche.HvLLow']
+  se_coef_site <- cox.res$coefficients[,'se(coef)']['sitePrimarySite']
+  
+  z_hvl <- cox.res$coefficients[,'z']['niche.HvLLow']
+  z_site <- cox.res$coefficients[,'z']['sitePrimarySite'] 
+  
+  pr_z_hvl <- cox.res$coefficients[,'Pr(>|z|)']['niche.HvLLow']
+  pr_z_site <- cox.res$coefficients[,'Pr(>|z|)']['sitePrimarySite'] 
+  
+  lower.95_hvl <- cox.res$conf.int[,'lower .95']["niche.HvLLow"]
+  lower.95_site <- cox.res$conf.int[,'lower .95']["sitePrimarySite"]
+  
+  upper.95_hvl <- cox.res$conf.int[,'upper .95']["niche.HvLLow"]
+  upper.95_site <- cox.res$conf.int[,'upper .95']["sitePrimarySite"]  
+  
+  logtest_test <- cox.res$logtest["test"]
+  logtest_df <- cox.res$logtest["df"]
+  logtest_p <- cox.res$logtest["pvalue"]
+  
+  waldtest_test <- cox.res$waldtest["test"]
+  waldtest_df <- cox.res$waldtest["df"]
+  waldtest_p <- cox.res$waldtest["pvalue"]
+  
+  stats_output <- c(k, coef_hvl, exp_coef_hvl, se_coef_hvl, z_hvl, pr_z_hvl, lower.95_hvl, upper.95_hvl,
+                    coef_site, exp_coef_site, se_coef_site, z_site, pr_z_site, lower.95_site, upper.95_site,
+                    logtest_test, logtest_df, logtest_p, waldtest_test, waldtest_df, waldtest_p)
+  
+  res_df <- rbind(res_df, stats_output)
+  
+  colnames(res_df) <- c("niche", "coef_hvl", "exp_coef_hvl", "se_coef_hvl", "z_hvl", "pr_z_hvl", "lower.95_hvl", "upper.95_hvl",
+                        "coef_site", "exp_coef_site", "se_coef_site", "z_site", "pr_z_site", "lower.95_site", "upper.95_site",
+                        "logtest_test", "logtest_df", "logtest_p", "waldtest_test", "waldtest_df", "waldtest_p")
+  
+  ggsurvplot(sfit, data=jointDF, conf.int = FALSE, 
+             pval = FALSE, title=paste("Niche: ",k, "\np=", pval.str),
+             legend.labs=c("Lymph Node/High", "Primary/High", "Lymph Node/Low", "Primary/Low"),
+             legend.title="", legend = c(0.8,0.83), linetype = c("site"), palette = "jco")
+  
+  #ggsave(paste0("survival_plots/niche_", k, "_KM_curve_split.pdf"), height = 8, width = 10, dpi = 300, device = "pdf", units = "in")
+}
+
+write.csv(res_df, paste0(root_path, "all_survival_results.csv"))
+```
+
+
+# Survival stratified by tissue -- LN
+```{r fig.height = 4, fig.width = 5}
+summaryNiche <- allNiches %>% group_by(SampleName, SiteLoc, Cohort) %>% mutate(total = n()) %>% group_by(SampleName, SiteLoc, Cohort, neighborhood50,total) %>% summarise(members = n()) 
+
+# Insert zeroes for missing niches
+all_samples <- unique(summaryNiche[,c(1:3,5)])
+all_niche_sample <- data.frame(SampleName = as.vector(sapply(all_samples$SampleName, rep, 9)), neighborhood50 = rep(0:8, 40)) %>% left_join(all_samples)
+summaryNiche_test <- left_join(all_niche_sample, summaryNiche)
+summaryNiche_test$members[is.na(summaryNiche_test$members)] <- 0
+
+# Calculate high/low
+summaryNiche_withorigin <- summaryNiche_test %>%
+  mutate(perc = members/total) %>% group_by(neighborhood50) %>% mutate(mu = median(perc)) %>% mutate(nicheLabel = if_else(perc >= mu, "High","Low"))
+
+# write.csv(summaryNiche, paste0(root_path, "by_tissue_summary_survival.csv"), row.names = FALSE)
+
+res_df_ln <- data.frame(matrix(ncol = 14, nrow = 0))
+for(k in 0:8){
+  
+  #k <- 0
+  tmp <- summaryNiche_withorigin %>% filter(neighborhood50 == k & SiteLoc == "Lymphnode")
+  jointDF <- merge(tmp,toe, by.x = "SampleName", by.y = "IMC Hyperion ID")
+  
+  
+  surv.obj <- Surv(jointDF$day_to_followup, jointDF$Case)
+  niche.HvL <- as.factor(jointDF$nicheLabel)
+  survfit( (surv.obj ~ niche.HvL) )
+  cox.res <- summary( coxph(surv.obj ~ niche.HvL)  )
+  pval.str <- format(cox.res$logtest["pvalue"], digits = 3)
+  
+  # exp(coef), coef, se, z, pr(z), lower.95 upper.95, wald test
+  coef_hvl <- cox.res$coefficients[,'coef']
+  exp_coef_hvl <- cox.res$coefficients[,'exp(coef)']
+  se_coef_hvl <- cox.res$coefficients[,'se(coef)']
+  z_hvl <- cox.res$coefficients[,'z']
+  pr_z_hvl <- cox.res$coefficients[,'Pr(>|z|)']
+  lower.95_hvl <- cox.res$conf.int[,'lower .95']
+  upper.95_hvl <- cox.res$conf.int[,'upper .95']
+  
+  logtest_test <- cox.res$logtest["test"]
+  logtest_df <- cox.res$logtest["df"]
+  logtest_p <- cox.res$logtest["pvalue"]
+  
+  waldtest_test <- cox.res$waldtest["test"]
+  waldtest_df <- cox.res$waldtest["df"]
+  waldtest_p <- cox.res$waldtest["pvalue"]
+  
+  stats_output <- c(k, coef_hvl, exp_coef_hvl, se_coef_hvl, z_hvl, pr_z_hvl, lower.95_hvl, upper.95_hvl,
+                    logtest_test, logtest_df, logtest_p, waldtest_test, waldtest_df, waldtest_p)
+  
+  res_df_ln <- rbind(res_df_ln, stats_output)
+  colnames(res_df_ln) <- c("niche", "coef_hvl", "exp_coef_hvl", "se_coef_hvl", "z_hvl", "pr_z_hvl", "lower.95_hvl", "upper.95_hvl",
+                           "logtest_test", "logtest_df", "logtest_p", "waldtest_test", "waldtest_df", "waldtest_p")
+  
+  #pdf(paste0("survival_plots/niche_", k, "_KM_curve_LN_withzeroes.pdf"), height = 5, width = 6)
+  plot(survfit(surv.obj ~ niche.HvL), lwd = 3, col = 1:2, 
+       main = paste("LN/Niche: ",k, "\np=", pval.str),
+       xlab = "Days")
+  legend("topright", levels(niche.HvL),
+         col = 1:2, lwd = 2)
+  #dev.off()
+}
+
+write.csv(res_df_ln, paste0(root_path, "LN_survival_results_withzeroes.csv"), row.names = FALSE)
+```
+
+
+
+# Survival stratified by tissue -- PS
+```{r fig.height = 4, fig.width = 5}
+res_df_ps <- data.frame(matrix(ncol = 14, nrow = 0))
+for(k in 0:8){
+  
+  #k <- 0
+  tmp <- summaryNiche_withorigin %>% filter(neighborhood50 == k & SiteLoc == "PrimarySite")
+  jointDF <- merge(tmp,toe, by.x = "SampleName", by.y = "IMC Hyperion ID")
+  
+  
+  surv.obj <- Surv(jointDF$day_to_followup, jointDF$Case)
+  niche.HvL <- as.factor(jointDF$nicheLabel)
+  survfit( (surv.obj ~ niche.HvL) )
+  cox.res <- summary( coxph(surv.obj ~ niche.HvL)  )
+  pval.str <- format(cox.res$logtest["pvalue"], digits = 3)
+  
+  # exp(coef), coef, se, z, pr(z), lower.95 upper.95, wald test
+  coef_hvl <- cox.res$coefficients[,'coef']
+  exp_coef_hvl <- cox.res$coefficients[,'exp(coef)']
+  se_coef_hvl <- cox.res$coefficients[,'se(coef)']
+  z_hvl <- cox.res$coefficients[,'z']
+  pr_z_hvl <- cox.res$coefficients[,'Pr(>|z|)']
+  lower.95_hvl <- cox.res$conf.int[,'lower .95']
+  upper.95_hvl <- cox.res$conf.int[,'upper .95']
+  
+  logtest_test <- cox.res$logtest["test"]
+  logtest_df <- cox.res$logtest["df"]
+  logtest_p <- cox.res$logtest["pvalue"]
+  
+  waldtest_test <- cox.res$waldtest["test"]
+  waldtest_df <- cox.res$waldtest["df"]
+  waldtest_p <- cox.res$waldtest["pvalue"]
+  
+  stats_output <- c(k, coef_hvl, exp_coef_hvl, se_coef_hvl, z_hvl, pr_z_hvl, lower.95_hvl, upper.95_hvl,
+                    logtest_test, logtest_df, logtest_p, waldtest_test, waldtest_df, waldtest_p)
+  
+  res_df_ps <- rbind(res_df_ps, stats_output)
+  colnames(res_df_ps) <- c("niche", "coef_hvl", "exp_coef_hvl", "se_coef_hvl", "z_hvl", "pr_z_hvl", "lower.95_hvl", "upper.95_hvl",
+                           "logtest_test", "logtest_df", "logtest_p", "waldtest_test", "waldtest_df", "waldtest_p")  
+  
+  #pdf(paste0("survival_plots/niche_", k, "_KM_curve_PS_withzeroes.pdf"), height = 5, width = 6)
+  plot(survfit(surv.obj ~ niche.HvL), lwd = 3, col = 1:2, 
+       main = paste("PS/Niche: ",k, "\np=", pval.str),
+       xlab = "Days")
+  legend("topright", levels(niche.HvL),
+         col = 1:2, lwd = 2)
+  #dev.off()
+}
+write.csv(res_df_ps, paste0(root_path, "PS_survival_results_withzeroes.csv"), row.names = FALSE)
+```
+
+
+# Create summary table by ROI
+```{r}
+summaryNiche_roi <- allNiches %>% group_by(ROI) %>% mutate(total = n()) %>% 
+  group_by(ROI,neighborhood50,total) %>% summarise(members = n()) %>%
+  mutate(perc = members/total) %>% group_by(neighborhood50) %>% 
+  mutate(mu = median(perc)) %>% mutate(nicheLabel = if_else(perc >= mu, "High","Low"))
+write.csv(summaryNiche_roi, paste0(root_path, "by_roi_summary_survival.csv"), row.names = FALSE)
+```
+
+
+```{r}
+summaryNiche_withorigin <- allNiches %>% group_by(SampleName, SiteLoc, Cohort) %>% mutate(total = n()) %>% group_by(SampleName, SiteLoc, Cohort, neighborhood50,total) %>% summarise(members = n()) %>%
+  mutate(perc = members/total) %>% group_by(neighborhood50) %>% mutate(mu = median(perc)) %>% mutate(nicheLabel = if_else(perc >= mu, "High","Low"))
+
+withorigin_6 <- summaryNiche_withorigin %>% filter(neighborhood50 == "6")
+table(withorigin_6$SiteLoc, withorigin_6$nicheLabel)
+
+write.csv(summaryNiche_withorigin, paste0(root_path, "by_tissue_summary_survival_withsite.csv"), row.names = FALSE)
+```
+
+
+```{r}
+summaryNiche_roi_withsite <- allNiches %>% group_by(ROI, SiteLoc, Cohort) %>% mutate(total = n()) %>% 
+  group_by(ROI, SiteLoc, Cohort,neighborhood50,total) %>% summarise(members = n()) %>%
+  mutate(perc = members/total) %>% group_by(neighborhood50) %>% mutate(mu = median(perc)) %>% 
+  mutate(nicheLabel = if_else(perc >= mu, "High","Low"))
+write.csv(summaryNiche_roi, paste0(root_path, "by_roi_summary_survival_withsite.csv"), row.names = FALSE)
+```
+
+
